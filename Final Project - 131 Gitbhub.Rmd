@@ -1,0 +1,899 @@
+---
+title: "Final Project - Intro to Machine Learning"
+author: 'Amir Voloshin'
+date: "12/08/2022"
+output:
+  html_document:
+    df_print: paged
+  pdf_document: default
+---
+```{r, message=FALSE, warning=FALSE}
+# Libraries
+library(readr)
+library(dplyr)
+library(ggplot2)
+library(maps)
+library(stringr)
+library(tidyverse)
+library(cluster)
+library(ISLR)
+library(glmnet)
+library(tree)
+library(maptree)
+library(randomForest)
+library(gbm)
+library(ROCR)
+library(cluster)
+library(class)
+library(FNN)
+library(dendextend)
+library(e1071)
+library(Rfast)
+library(gridExtra)
+library(grid)
+```
+
+
+```{r, message=FALSE, warning=FALSE, results='hide'}
+# Data
+## read data and convert candidate names and party names from string to factor
+## we manually remove the variable "won", the indicator of county level winner
+## In Problem 5 we will reproduce this variable!
+election.raw <- read_csv("candidates_county.csv", col_names = TRUE) %>% 
+  mutate(candidate = as.factor(candidate), party = as.factor(party), won = NULL)
+
+## remove the word "County" from the county names
+words.to.remove = c("County")
+remove.words <- function(str, words.to.remove){
+  sapply(str, function(str){
+    x <- unlist(strsplit(str, " "))
+    x <- x[!x %in% words.to.remove]
+    return(paste(x, collapse = " "))
+  }, simplify = "array", USE.NAMES = FALSE)
+}
+election.raw$county <- remove.words(election.raw$county, words.to.remove)
+
+## read census data
+census <- read_csv("census_county.csv") 
+```
+
+# Election Data  
+### (Q1)  
+```{r}
+# Dimension
+dim(election.raw)
+
+# Missing Values?
+election.raw[!complete.cases(election.raw),]
+
+# Distinct values
+unique(election.raw$state)
+```
+The election.raw data set has dimensions of 32177 x 5, and there are no missing values. There are indeed 51 unique values in the state column, indicating that the data contains all the states and a federal district.    
+
+
+# Census data  
+### (Q2)
+```{r}
+# Dimension
+dim(census)
+
+# Missing Values?
+census[!complete.cases(census),]
+
+# Distinct counties in census
+dim(census %>% distinct(County, State))
+
+# Distinct counties in election.raw
+dim(election.raw %>% distinct(county, state))
+```
+The dimensions of the census data set are 3220 x 37, and there is one observation with a missing value. The election.raw has 51 distinct values in the State column, while the census data set has 52 distinct values in the State column. The difference between these two data sets is that the census data set includes Puerto Rico as a State, while the election.raw data set does not. In addition, census has a total of 3220 distinct counties, while election.raw has 4633 distinct counties. This means there is likely some discrepency in the election.raw dataset because there are a total of 3243 counties in the US (including counties of territoriesterritories). 
+
+# Data Wrangling
+### (Q3) See Source Code
+```{r}
+# state-level summary, total votes per candidate per state
+election.state <- election.raw %>% group_by(candidate, state) %>% mutate(total_votes = sum(total_votes)) %>% distinct(total_votes)
+
+# federal-level summary, total votes per candidate in the US
+election.total <- election.raw %>% group_by(candidate) %>% mutate(total_votes = sum(total_votes)) %>% distinct(total_votes)
+```
+
+### (Q4)
+All Named Candidates Printed Below:  
+```{r, fig.align='center', fig.height=7, fig.width=7.5, message=FALSE, warning=FALSE,}
+# Number of presidential candidates in the 2020 election
+unique(election.raw$candidate) # 36 Named Candidates
+
+# Calculating total votes per candidate
+can_unique <- unique(as.vector(election.raw$candidate))
+can_votes <- rep(0, 38)
+for (i in 1:length(can_unique)){
+  d <- election.raw[election.raw$candidate == can_unique[i],]
+  can_votes[i] <- sum(d$total_votes)
+}
+
+can_votes <- as.numeric(can_votes)
+
+# Barplot for candidates 1-19
+par(mar=c(8,5,5,5))
+barplot(log(can_votes[1:19]), main = "Log of Total Votes Per Candidate from the 2020 Election", xlab = "", ylab = "log of Total Votes", names.arg = can_unique[1:19], cex.names = 0.8, las = 2, col = "lightblue", border = "black")
+
+# Barplot for candidates 20-38
+par(mar=c(9,5,5,5))
+barplot(log(can_votes[20:38]), main = "Log of Total Votes Per Candidate from the 2020 Election", ylab = "log of Total Votes", names.arg = can_unique[20:38], cex.names = 0.8, las = 2, col = "lightblue", border = "black")
+```
+  
+There were 36 named candidates in the 2020 election, 38 total but one is "Write-ins" and the other is "None of these candidates".    
+
+### (Q5) See Source Code
+```{r,message=FALSE, warning=FALSE}
+# Calculating County Winner
+county.winner <- election.raw %>% group_by(county) %>% mutate(votes = total_votes, total = sum(votes), pct = votes/total) %>% top_n(1)
+
+# Calculating State Winner
+state.winner <- election.raw %>% group_by(state) %>% mutate(votes = total_votes, total_votes = sum(votes)) %>% group_by(state, candidate) %>% mutate(votes_per_can = sum(votes), pct = votes_per_can/total_votes, votes = votes_per_can) %>% select(-votes_per_can) %>% group_by(state) %>% top_n(1) %>% distinct(pct, .keep_all = TRUE)
+```
+
+
+
+# Visualization
+ 
+### (Q6)
+```{r,fig.align='center', warning=FALSE}
+# Mapping the counties
+counties <- map_data("county")
+counties
+# Color by county
+ggplot(data = counties) + 
+  geom_polygon(aes(x = long, y = lat, fill = subregion, group = group),
+               color = "white") + coord_fixed(1.3) + guides(fill=FALSE) + ggtitle("Map of the United States, Bordered by County") + theme(plot.title = element_text(hjust = 0.5)) # color legend is unnecessary and takes too long
+```
+  
+### (Q7)
+```{r, fig.align='center'}
+# Changing column name to state
+states <- map_data("state")
+colnames(states)[5] <- "state"
+colnames(states)[6] <- "county"
+state.winner$state <- tolower(state.winner$state)
+
+# Left Join
+new_state <- left_join(states, state.winner, by = "state") # Making state column lowercase
+
+# Map
+ggplot(data = new_state) + 
+  geom_polygon(aes(x = long, y = lat, fill = candidate, group = group),
+               color = "white") + coord_fixed(1.3)  + ggtitle("Map of the United States, Filled by Color of Winning Candidate by State") + theme(plot.title = element_text(hjust = 0.5)) + guides(fill = guide_legend(title = "Candidate"))
+```
+  
+### (Q8)
+```{r, fig.align='center'}
+# Changing Column name to county
+counties <- map_data("county")
+colnames(counties)[5] <- "state"
+colnames(counties)[6] <- "county"
+county.winner$county <- tolower(county.winner$county) # Making county column lowercase
+county.winner$state <- tolower(county.winner$state) # Making state column lowercase
+
+# Subsetting for California
+ca.counties <- subset(counties, state == "california") 
+ca.county.winner <- subset(county.winner, state == "california")
+
+# Left Join
+cali <- left_join(ca.counties, ca.county.winner, by = "county")
+
+# Map of California
+ggplot(data = cali) + geom_polygon(aes(x = long, y = lat, fill = candidate, group = group), color = "white") + coord_fixed(1.3) + ggtitle("Map of California Counties, Filled by Color of Winning Candidate") + theme(plot.title = element_text(hjust = 0.5)) + guides(fill = guide_legend(title = "Candidate"))
+```
+  
+### (Q9)
+```{r, fig.align='center',fig.height=8,fig.width=8.5}
+# Obtaining the data I want
+data.circ <- census %>% select(State, Unemployment) %>% group_by(State) %>% mutate(Unemployment = sum(Unemployment)) %>% distinct() %>% data.frame()
+
+# Get the name and the y position of each label
+label_data <- data.circ$State %>% data.frame() 
+
+# calculate the angle of the labels
+number_of_bar <- nrow(label_data)
+angle <-  90 - 360 * (c(1:52) - 0.5) /number_of_bar     
+
+# calculate the alignment of labels
+label_data$hjust <- ifelse( angle < -90, 1, 0)
+ 
+# flip angle BY to make them readable
+label_data$angle <- ifelse(angle < -90, angle+180, angle)
+
+# Adjusting some angles
+label_data$angle[52] <- -7
+label_data$angle[40] <- -6.5
+
+# Plot
+par(mar = c(3,3,3,3))
+ggplot(data.circ, aes(x = State, y = Unemployment)) + geom_bar(stat="identity", fill = alpha("salmon", 1)) + ylim(-500, 2000) + theme_minimal() + theme(axis.text = element_blank(), axis.title = element_blank(), panel.grid = element_blank(), plot.margin = unit(rep(-1,4), "cm"), plot.title = element_text(hjust = 0.5, vjust = -20, size = 20)) +  coord_polar(start = 0) +  geom_text(data = label_data, aes(x = ., y = data.circ$Unemployment + 10, label = ., hjust = hjust), color = "black", fontface = "bold", angle = label_data$angle, alpha = 2, size=3, inherit.aes = FALSE) + ggtitle("Unemployment in the US by State") 
+```
+
+
+
+### (Q10)
+First Five Rows of the Census Data  
+```{r}
+# Cleaning Census
+census.clean <- census %>% filter(complete.cases(census)) %>% mutate(Men = Men/TotalPop, Employed = Employed/TotalPop, VotingAgeCitizen = VotingAgeCitizen/TotalPop, Minority = Hispanic + Black + Native + Asian + Pacific) %>% select(-c(Hispanic, Black, Native, Asian, Pacific, IncomeErr, IncomePerCap, IncomePerCapErr, Walk, PublicWork, Construction)) %>% select(-c(ChildPoverty, Women, White, Unemployment, OtherTransp, Production)) # Additional removal of colineared columns
+
+# First Five Rows of census.clean
+head(census.clean, 5)
+```
+Removed the Following Variables:  
+- ChildPoverty because correlation with Poverty is close to 1, 0.93823316.  
+- Women because it is a linear combination of Men and TotalPop.  
+- White because it is a linear combination of Minority and TotalPop.  
+- Unemployment, because it is colineared with Employment.  
+- OtherTransp because it is a linear combination with Walking, Bus, Carpool, etc.  
+- Production because it is colineared with Professional, Service, Office, and Employed.  
+
+
+# Dimensionality Reduction
+### (Q11)
+Sorted Principle Component Values  
+```{r}
+# Running PCA
+pca <- prcomp(select(census.clean, -c(State, County)), scale = TRUE, center = TRUE)
+
+# Saving first two principle components
+pc.county <- pca$rotation[1:19, 1:2] 
+
+# Three largest absolute values of PC1
+sort(abs(pca$rotation[1:19]), decreasing = TRUE) 
+```
+I center and scale my features prior to running PCA, because numerically, all of these predictors are on significantly different scales which means if I ran PCA with data that isn't all on the same scale I would have very poor results. 
+
+The three features with the largest absolute values of the first principal component are Employed, Poverty, and Income Their loading values are  0.42144094, 0.41451888, and 0.40193430 respectively.  
+
+TotalPop, Men, Income, Professional, Transit, WorkAtHome, Employed, PrivateWork, SelfEmployed, and FamilyWork all have negative loading values. Negative loading values are simply coefficients of some predictors which make the linear combination of a given principle component.  
+  
+### (Q12)
+```{r, fig.align='center'}
+# Calculating PVE
+pca.var <- pca$sdev^2
+pve <- pca.var/sum(pca.var)
+
+# Principal Component PVE
+plot(pve, col = "royalblue3", main = "Graph of PVE", xlab = "Principal Component", 
+     ylab = "Proportion of Variance Explained ", ylim = c(0, 1), type = 'b')
+
+# Cumulative PVE
+plot(cumsum(pve), col = "firebrick2", main = "Graph of Cumulative PVE", xlab = "Principal Component", 
+     ylab = "Cumulative Proportion of Variance Explained", ylim = c(0, 1), type = 'b')
+
+# How many PCs to explain 90% of total variation?
+pve90 <- 0
+i <- 1
+while (pve90 < 0.9){
+    pve90 <- pve90 + pve[i]
+    i <- i + 1
+}
+i - 1
+```
+The minimum number of principle components needed to capture 90% of the data is 12 principle components. 
+
+
+
+# Clustering 
+### (Q13)
+```{r}
+# Standardize the variables by subtracting mean and divided by standard deviation
+s.census.clean <- scale(select(census.clean, -c(State, County)), center = TRUE, scale = TRUE)
+
+# Calculating distance
+census.dist <- dist((s.census.clean)) 
+
+# Hierarchical Clustering with Complete Linkage
+census.hclust <- hclust(census.dist)
+
+# Cutting the tree into 10 clusters
+census.cut <- cutree(census.hclust, 10)
+# census.cut[228] # Santa Barbara County is the 228th observation, it is in the first cluster
+table(census.cut) # Checking how many observations are in each cluster
+
+# Running Hierarchical clustering with first 2 PC's of pc.county
+county.pc <- as.matrix(select(census.clean, -State, -County)) %*% (as.matrix(pc.county))
+pc.dist <- dist(county.pc)
+pc.hclust <- hclust(pc.dist)
+pc.cut <- cutree(pc.hclust, 10)
+# pc.cut[228] # Checking which cluster Santa Barbara is in, it is in the second cluster
+table(pc.cut) # Checking how many observations are in each cluster
+
+# Printing all the counties in Santa Barbara's cluster
+census.clean[pc.cut == 2,] 
+```
+After cutting the tree into 10 clusters with the original data, I find that Santa Barbara County is in a cluster with 2120 other counties-making it very hard to interpret this cluster. With the first two principal components of pc.county, after cutting the tree into 10 clusters, Santa Barbara county is in a cluster with only 183 other counties. This makes it much more feasible to interpret the results of a cluster with only 184 observations as opposed to one with 2121 observations, so the second approach seems to cluster Santa Barbara more appropriately. It is important to note though that there are other clusters with very many observations, so while the second approach is better for Santa Barbara County, it may be useless if we are looking at other counties. In the cluster from the principle component method, Santa Barbara County is appears to be clustered with counties who have similar demographics for Employment, Income, and Minorities. 
+
+
+# Classification
+```{r}
+# Pre-Processing
+
+# we move all state and county names into lower-case
+tmpwinner <- county.winner %>% ungroup %>%
+  mutate_at(vars(state, county), tolower)
+
+# we further remove suffixes of "county" and "parish"
+tmpcensus <- census.clean %>% mutate_at(vars(State, County), tolower) %>%
+  mutate(County = gsub(" county|  parish", "", County)) 
+
+# we join the two datasets
+election.cl <- tmpwinner %>%
+  left_join(tmpcensus, by = c("state"="State", "county"="County")) %>% na.omit
+
+# drop levels of county winners if you haven't done so in previous parts
+election.cl$candidate <- droplevels(election.cl$candidate)
+election.cl.copy <- election.cl # For mapping classification results
+
+## save meta information
+election.meta <- election.cl %>% select(c(county, party, CountyId, state, total_votes, pct, total))
+
+## save predictors and class labels
+election.cl = election.cl %>% select(-c(county, party, CountyId, state, total_votes, pct, total))
+```
+
+
+
+### (Q14)  
+We need to remove the predictor party from the election.cl data set because all of the other predictors are numerical data, while party is a factor. If we left party in the election.cl data set we would not be able to run models from the data set. We are trying to predict which candidate will win which county from the census data, and the candidates party is not necessary to do so.  
+
+
+```{r}
+# Partitioning the data into 80% training and 20% test 
+set.seed(10) 
+n <- nrow(election.cl)
+idx.tr <- sample.int(n, 0.8*n) 
+election.tr <- election.cl[idx.tr, ]
+election.te <- election.cl[-idx.tr, ]
+
+# Defining 10 cross-validation folds
+set.seed(20) 
+nfold <- 10
+folds <- sample(cut(1:nrow(election.tr), breaks=nfold, labels=FALSE))
+
+# Function to predict error rate
+calc_error_rate = function(predicted.value, true.value){
+  return(mean(true.value!=predicted.value))
+}
+records = matrix(NA, nrow=3, ncol=2)
+colnames(records) = c("train.error","test.error")
+rownames(records) = c("tree","logistic","lasso")
+```
+
+### (Q15)
+```{r, fig.align='center'}
+# Decision tree for predicting Candidate
+tree.can <- tree(candidate ~., data = election.tr)
+
+# Un-Pruned plot
+plot(tree.can, type = "uniform")
+text(tree.can, cex = 0.5, col = "red")
+title("Full Tree Predicting Winning Candidate", adj = 0.75)
+
+# Cross-Validation
+cv.pruned <- cv.tree(tree.can, FUN=prune.misclass, K = folds)
+
+# Best size 
+# taking the tree with the smaller size
+best_size <- min(cv.pruned$size[cv.pruned$dev == min(cv.pruned$dev)])
+
+# Prune tree.can
+can.pruned <- prune.misclass(tree.can, best = best_size)
+
+# Pruned-Plot
+plot(can.pruned, type = "uniform")
+text(can.pruned, cex = 0.6, col = "navyblue")
+title("Pruned Tree Predicting Winning Candidate", adj = 0.5)
+
+# Predicting on Training Data
+tree.pred.tr <- predict(can.pruned, election.tr, type = "class") 
+
+# Predicting on Test Data
+tree.pred.te <- predict(can.pruned, election.te, type = "class") 
+
+# Saving training and test errors to records
+records[1,1] <- calc_error_rate(tree.pred.tr, election.tr$candidate)
+records[1,2] <- calc_error_rate(tree.pred.te, election.te$candidate)
+records
+```
+The un-pruned tree has many more terminal nodes than the pruned tree, 17 and 8 terminal nodes respectively. The most impactful predictors for predicting the winning candidate for a county are Transit, Minority, and TotalPop. So for example, in a county where Transit is less than 1.15 and Minority is less than 48.5, Donald Trump is predicted to win. Another example, in a county where Transit is greater than 1.15, and the Total Population is greater than 206114, Joe Biden is predicted to win.
+
+
+### (Q16)
+Implementing Logistic Regression
+```{r}
+# fitting the model
+can.fit <- glm(candidate~ ., data = election.tr, family = "binomial")
+
+# Predicting training data
+prob.train <- predict(can.fit, newdata = election.tr, type = "response")
+log.train.res <- election.tr %>% mutate(cand_train = as.factor(ifelse(prob.train <= 0.5, "Donald Trump", "Joe Biden")))
+
+# Predicting test data
+prob.test <- predict(can.fit, newdata = election.te, type = "response")
+log.test.res <- election.te %>% mutate(cand_test = as.factor(ifelse(prob.test <= 0.5, "Donald Trump", "Joe Biden")))
+
+# Saving training and test errors to records
+records[2,1] <- calc_error_rate(log.train.res$cand_train, election.tr$candidate)
+records[2,2] <- calc_error_rate(log.test.res$cand_test, election.te$candidate)
+records
+```
+The significant variables in my logistic regression model are TotalPop, VotingAgeCitizen, Poverty, Professional, Drive, Carpool, Employed, PrivateWork, and Minority. These significant variables are similar to the most significant variables from the decision tree. e to the power of these coefficients are the odds ratio which are associated with the prediction of the candidate. A unit increase will cause change by a factor of $e^{coefficient}$. If there is an increase of the Employed coefficient which is 21.11 by 1, the odds of the outcome change by a factor of $e^{21.11}$. Similarly, if the VotingAgeCitizen coefficient which is 20.99 is increase by 1, the odds of the outcome change by a factor of $e^{20.99}$.  
+With the data I have, there is no linear combination of predictors which can perfectly predict the winning candidate. 
+
+### (Q17)
+Implementing Lasso Regression 
+```{r}
+# Defining x and y 
+x.train <- model.matrix(candidate~., election.tr)[,-1]
+y.train <- election.tr$candidate
+x.test <- model.matrix(candidate~., election.te)[,-1]
+y.test <- election.te$candidate
+
+# Obtaining Best lambda for logistic regression with a Lasso Penalty
+lamgrid.lasso <- cv.glmnet(x.train, y.train, lambda = seq(1, 50)*1e-4, nfolds = 10, alpha = 1, family = "binomial")
+
+# Lasso model
+lasso.mod <- glmnet(x.train, y.train, alpha = 1, lambda = lamgrid.lasso$lambda.min, family = "binomial")
+
+# Training 
+train.prob.las <- predict(lasso.mod, s = lamgrid.lasso$lambda.min, newx = x.train, family = "binomial", type = "response")
+train.lasso <- election.tr %>% mutate(cand_train = as.factor(ifelse(train.prob.las <= 0.5, "Donald Trump", "Joe Biden")))
+
+# Test 
+test.prob.las <- predict(lasso.mod, s = lamgrid.lasso$lambda.min, newx = x.test, family = "binomial", type = "response")
+test.lasso <- election.te %>% mutate(cand_test = as.factor(ifelse(test.prob.las <= 0.5, "Donald Trump", "Joe Biden")))
+
+# Saving training and test errors to records
+records[3,1] <- calc_error_rate(train.lasso$cand_train, y.train) 
+records[3,2] <- calc_error_rate(test.lasso$cand_test, y.test)
+
+# Checking nonzero values
+lasso.mod$beta
+```
+The optimal value of lambda from the cross validation is 0.0026. The predictors which were found to be most meaningful are Employed and VotingAgeCitizen, and these are consistent with the most significant variables in logistic and lasso regression. I have two predictors which are zero, votes and WorkAtHome. These two predictors in my logistic regression model are not very significant, so the lasso penalizing them makes sense here.  
+
+
+
+
+
+### (Q18)
+```{r, fig.align='center'}
+# ROC Curves
+# Tree
+tree.prob.te <- predict(can.pruned, election.te, type = "vector") %>% data.frame()
+pred.tree <- prediction(tree.prob.te$Joe.Biden, election.te$candidate) 
+tree.perf <- performance(pred.tree, measure = "tpr", x.measure = "fpr") 
+
+# Logistic Regression
+pred.log <- prediction(prob.test, election.te$candidate)
+log.perf <- performance(pred.log, measure = "tpr", x.measure = "fpr")
+
+# Lasso Regression
+pred.las <- prediction(test.prob.las, y.test)
+las.perf <- performance(pred.las, measure = "tpr", x.measure = "fpr")
+
+# Plotting all three curves
+plot(log.perf, col = "Red", lwd = 2, main = "ROC Curves", xlab = "False Positive Rate", ylab = "True Positive Rate")
+plot(tree.perf, col = "Purple", add = TRUE, lwd = 2)
+plot(las.perf, col = "Blue", add = TRUE, lwd = 2)
+legend(0.7, 0.3, legend = c("Decision Tree", "Logistic Regression", "Lasso Regression"), col = c("Purple", "Red", "Blue"), lty = 1, cex = 0.8)
+abline(0,1)
+```
+  
+Based on my classification results, Lasso Regression was shown to be the most accurate model for predicting candidate winner by county. The Logistic Regression model was a very close second to Lasso, while the decision tree model was quite far. The benefit of the decision tree is it's interpretability, it is very easy to visually see how the tree, quite literally, makes decisions. Although the disadvantage of the decision tree is it's accuracy compared to logistic and lasso regression. With Logistic and Lasso Regression, their disadvantage is their interpretability in the decision making, although the final result is very easy to understand. And of course their benefit is their low test error rates. I think the different classifiers are more appropriate for answering different questions about the election. Is it very likely that for a certain question a decision tree model will out perform a Logistic and Lasso Regression model. 
+
+
+
+
+# Taking it Further
+### (Q19)
+```{r}
+# Producing a new records table to compare error rates
+records2 = matrix(NA, nrow=5, ncol=2)
+colnames(records2) = c("train.error","test.error")
+rownames(records2) = c("tree","logistic","lasso", "KNN", "SVM")
+
+# Adding prior models error rates
+records2[1,1] <- calc_error_rate(tree.pred.tr, election.tr$candidate)
+records2[1,2] <- calc_error_rate(tree.pred.te, election.te$candidate)
+records2[2,1] <- calc_error_rate(log.train.res$cand_train, election.tr$candidate)
+records2[2,2] <- calc_error_rate(log.test.res$cand_test, election.te$candidate)
+records2[3,1] <- calc_error_rate(train.lasso$cand_train, y.train) 
+records2[3,2] <- calc_error_rate(test.lasso$cand_test, y.test)
+```
+Implementing K-Nearest Neighbor Model to Predict Winning Candidate
+```{r}
+# Running cross validation to find a good value of k
+best.k <- knn.cv(folds = folds, nfolds = 5, y = election.tr$candidate, x = as.matrix(select(election.tr, -candidate)), k = c(5:25))
+
+# testing on training data
+knn.train <- class::knn(train = select(election.tr, -candidate), test = select(election.tr, -candidate), cl = election.tr$candidate, k = 25)
+
+# testing on test data
+knn.test <- class::knn(train = select(election.tr, -candidate), test = select(election.te, -candidate), cl = election.tr$candidate,  k = 25)
+
+# Adding error rates to records2
+records2[4,1] <- calc_error_rate(knn.train, election.tr$candidate) 
+records2[4,2] <- calc_error_rate(knn.test, election.te$candidate)
+records2
+```
+
+
+Implementing a Support Vector Machine Model to Predict Winning Candidate  
+```{r}
+### Q19 continued...
+# Implementing Support Vector Machine
+# Cross-Validation for Best Tuning Parameters 
+set.seed(1)
+tune.svm <- tune(svm, candidate~., data = election.tr, kernel = "linear", ranges=list(cost=c(0.001, 0.01, 0.1, 1, 5, 10, 100)), gamma=c(0.5,1,2,3,4))
+
+# Obtaining the best model
+svm.best <- tune.svm$best.model
+
+# Predicting the training data
+svm.pred.tr <- predict(svm.best, election.tr)
+
+# Predicting the test data
+svm.pred.te <- predict(svm.best, election.te)
+
+# Adding error rates to records2
+records2[5,1] <- calc_error_rate(svm.pred.tr, election.tr$candidate)
+records2[5,2] <- calc_error_rate(svm.pred.te, election.te$candidate)
+records2
+```
+My KNN model had the worst train and test error rates out of all of my other classification models, likely because of the curse of dimensionality. Although it was the worst model, it's test error rate is not terrible.  
+As we can see right above, the Support Vector Machine model had the lowest error rates out of all the classification methods used. It has the lowest train error rate, and matches Lasso Regression for the lowest test error rate. 
+
+  
+### (Q20)  
+```{r}
+# Creating a data set to run Linear Regression
+election.lm <- election.raw[election.raw$candidate == "Donald Trump" | election.raw$candidate == "Joe Biden",]
+
+# we move all state and county names into lower-case
+election.lm2 <- election.lm %>% ungroup %>%
+  mutate_at(vars(state, county), tolower)
+
+# we join the two datasets
+election.lin <- election.lm2 %>%
+  left_join(tmpcensus, by = c("state"="State", "county"="County")) %>% na.omit
+
+# # drop levels of county winners if you haven't done so in previous parts
+election.lin$candidate <- droplevels(election.lin$candidate)
+
+## save predictors and class labels
+elec.lm = election.lin %>% select(-c(party, CountyId, state))
+
+# Partitioning the data into 80% training and 20% test 
+lm.dat.tr <- elec.lm[1:4942, ]
+lm.dat.te <- elec.lm[4943:6178,]
+```
+
+
+Implementing Linear Regression to predict total votes for each candidate by county  
+Mean Squared Error's and Error Rate's Printed Below, Train and Test Respectively  
+```{r, message=FALSE, warning=FALSE,}
+# Fitting the Linear Regression Model
+lm.fit <- lm(total_votes ~. -candidate, data = lm.dat.tr[,-1])
+
+# Predicting on training set 
+lm.pred.tr <- predict(lm.fit, lm.dat.tr[,-1])
+
+# Predicting on test set
+lm.pred.te <- predict(lm.fit, lm.dat.te[,-1])  
+
+# Saving results to a data frame
+results.tr <- data.frame(pred = lm.pred.tr, actual = lm.dat.tr$total_votes)
+results.te <- data.frame(pred = lm.pred.te, actual = lm.dat.te$total_votes)
+
+# Calculating train and test MSE
+mean((results.tr$actual - results.tr$pred)^2) # train
+mean((results.te$actual - results.te$pred)^2) # test
+
+# Creating data frames of with votes per candidate per county
+pred.tr.win <- data.frame(county = lm.dat.tr$county, candidate = lm.dat.tr$candidate, pred = lm.pred.tr) # train 
+pred.te.win <- data.frame(county = lm.dat.te$county, candidate = lm.dat.te$candidate, pred = lm.pred.te) # test
+
+# Calculating Winner by county 
+lm.dat.tr.winner <- lm.dat.tr[order(lm.dat.tr$county),] %>% group_by(county) %>% top_n(1, total_votes)
+lm.dat.te.winner <- lm.dat.te[order(lm.dat.te$county),] %>% group_by(county) %>% top_n(1, total_votes)
+
+# sorting and filtering the training and test sets for classification comparison
+county.winner.reg.tr <- pred.tr.win[order(pred.tr.win$county),] %>% group_by(county) %>% top_n(1)
+county.winner.reg.te <- pred.te.win[order(pred.te.win$county),] %>% group_by(county) %>% top_n(1)
+
+# Calculating test and error rates
+calc_error_rate(county.winner.reg.tr$candidate, lm.dat.tr.winner$candidate) # train
+calc_error_rate(county.winner.reg.te$candidate, lm.dat.te.winner$candidate) # test
+```
+
+
+Linear Regression is a way of predicting how many votes a candidate will receive by county. Although I would personally prefer to use a classification method for predicting who will win a county, or state. Classification provides a quicker direct answer (ie who won), whereas with Regression some further wrangling is required to see who received the most votes. Furthermore, error rate with classification is much easier to interpret than MSE in Regression. Especially with very large data, MSE can get really large and is hard to interpret, while error rate is on a simple scale. An additional problem with Regression is that some candidates are predicted negative votes, which is obviously not possible. Of course, each method for their own use, if I am trying to get a number for total votes, go with regression. If I am only interested in the winner, then classification. Regression and Classification can complement each other if we want to validate the results beyond a test set (seeing if in fact the candidate with the most votes was predicted to win).  
+
+In order to get good interpretation of Regression, we would need to convert the votes into winner for each county, and classify the winner by county by the candidate which had the most votes. I did this, calculating train and error rates, and the results were not good, 0.4960265 and 0.4827586 respectively. The Linear Regression model is a pure linear model, and the relationship between the predictors and the number of votes is probably non-linear, which is probably a big factor for lack of performance. Another effect is that it is possible to get negative values for predicted votes (indeed I got negative values), which simply are not possible for this question. With that being said, it is understandable that linear regression is not a good fit for this type of question. 
+
+
+### Q20 continued...
+
+Classification with Dimension Reduction (PCA)
+```{r}
+# Running PCA on training data 
+pc <- prcomp(select(election.tr, -c(candidate)), scale = TRUE, center = TRUE)
+
+# Calculating PVE
+pc.var<- pc$sdev^2
+pve.pc <- pca.var/sum(pca.var)
+
+# How many PCs to explain 90% of total variation?
+pve90.pc <- 0
+j <- 1
+while (pve90.pc < 0.9){
+    pve90.pc <- pve90.pc + pve.pc[j]
+    j <- j + 1
+}
+# j - 1
+
+# Using 12 principle components since they account for 90% of the variation
+pc12 <- as.matrix(pc$rotation[1:19, 1:12]) 
+
+# Creating Reduced training and test sets by matrix multiplication with principle components
+pca.tr <- data.frame(as.matrix(select(election.tr, -candidate)) %*% pc12) %>% mutate(candidate = election.tr$candidate)
+pca.te <- data.frame(as.matrix(select(election.te, -candidate)) %*% pc12) %>% mutate(candidate = election.te$candidate)
+```
+
+
+```{r}
+# Creating a new matrix to compare error rates among classifiers and dimension reduction
+records.pca = matrix(NA, nrow = 2, ncol = 4)
+colnames(records.pca) = c("train.error","test.error", "train.error(pca)", "test.error(pca)")
+rownames(records.pca) = c("logistic","lasso")
+
+# Adding prior models error rates
+records.pca[1,1] <- calc_error_rate(log.train.res$cand_train, election.tr$candidate)
+records.pca[1,2] <- calc_error_rate(log.test.res$cand_test, election.te$candidate)
+records.pca[2,1] <- calc_error_rate(train.lasso$cand_train, y.train) 
+records.pca[2,2] <- calc_error_rate(test.lasso$cand_test, y.test)
+```
+
+
+Implementing Logistic and Lasso Regression with Reduced Dimensions  
+```{r}
+# Implementing Logistic Regression with Reduced Dimensions  
+
+# fitting the model
+log.pc <- glm(candidate~ ., data = pca.tr, family = "binomial")
+
+# Predicting training data
+prob.train.pc <- predict(log.pc, newdata = pca.tr, type = "response")
+log.train.res.pc <- pca.tr %>% mutate(cand_train = as.factor(ifelse(prob.train.pc <= 0.5, "Donald Trump", "Joe Biden")))
+
+# Predicting test data
+prob.test.pc <- predict(log.pc, newdata = pca.te, type = "response")
+log.test.res.pc <- pca.te %>% mutate(cand_test = as.factor(ifelse(prob.test.pc <= 0.5, "Donald Trump", "Joe Biden")))
+
+# Calculating Training and Test Error Rates
+records.pca[1,3] <- calc_error_rate(log.train.res.pc$cand_train, election.tr$candidate)
+records.pca[1,4] <- calc_error_rate(log.test.res.pc$cand_test, election.te$candidate)
+```
+
+```{r}
+# Implementing Lasso Regression with Reduced Dimensions  
+
+# Defining x and y 
+x.train.pc <- model.matrix(candidate~., pca.tr)[,-1]
+y.train.pc <- pca.tr$candidate
+x.test.pc <- model.matrix(candidate~., pca.te)[,-1]
+y.test.pc <- pca.te$candidate
+
+# Obtaining Best lambda for logistic regression with a Lasso Penalty
+lamgrid.lasso.pc <- cv.glmnet(x.train.pc, y.train.pc, lambda = seq(1, 50)*1e-4, nfolds = 10, alpha = 1, family = "binomial")
+
+# Lasso model
+lasso.mod.pc <- glmnet(x.train.pc, y.train.pc, alpha = 1, lambda = lamgrid.lasso.pc$lambda.min, family = "binomial")
+
+# Training MSE
+las.prob.train.pc <- predict(lasso.mod.pc, s = lamgrid.lasso.pc$lambda.min, newx = x.train.pc, family = "binomial", type = "response")
+train.lasso.pc <- pca.tr %>% mutate(cand_train = as.factor(ifelse(las.prob.train.pc <= 0.5, "Donald Trump", "Joe Biden")))
+
+# Test MSE
+las.prob.test.pc <- predict(lasso.mod.pc, s = lamgrid.lasso.pc$lambda.min, newx = x.test.pc, family = "binomial", type = "response")
+test.lasso.pc <- pca.te %>% mutate(cand_test = as.factor(ifelse(las.prob.test.pc <= 0.5, "Donald Trump", "Joe Biden")))
+
+# Saving training and test errors to records
+records.pca[2,3] <- calc_error_rate(train.lasso.pc$cand_train, y.train.pc) 
+records.pca[2,4] <- calc_error_rate(test.lasso.pc$cand_test, y.test.pc)
+records.pca
+
+# Checking nonzero values
+lasso.mod.pc$beta
+```
+After re-running logistic and lasso regression with 12 principle components, which account for 90% of the variation, I have not gotten more accurate models. As shown above, the logistic regression test error rates are not too far off, but the model with the original data is still better. The same conclusion can be made with lasso regression, although the lasso regression model with PCA is much worse, from a test error rate of 0.06629834 with th original data, to 0.13259669 with PCA. Lasso actually removes some of the most important PC's because of its penalizing parameter. This specific model only has 4 out of 12 predictors with nonzero value, meaning a lot of information is lost. This process of taking away information by PCA and losing information by lasso increased the bias too much, ultimately leading to a poor model. 
+
+
+### (Q21)
+#### Overall Insights and Conclusion
+The ultimate goal of this project (other than experience) was to produce models which accurately predict who won a given county in the 2020 US Presidential election. To reach this goal, I did some data wrangling, some visualizations, and ran various different types of models. The data wrangling to is to make the raw data useful and valid for modeling. The visualizations were to understand what type of data I am dealing with, and to picture how it can be used for modeling. And finally, the models were created to predict which candidate won a given county.  
+
+The test error rates of each type of model I created are shown below. 
+```{r, fig.align='center'}
+# Creating a dataset for plotting
+model <- c(rep("Decision Tree", 2) , rep("Logistic", 2), rep("Lasso", 2), rep("KNN", 2), rep("SVM", 2), rep("Logistic (PCA)", 2), rep("Lasso (PCA)", 2), rep("Linear Reg", 2))
+error.type <- rep(c("Train" , "Test") , 8)
+value <- c(records2[1,1], records2[1,2], records2[2,1], records2[2,2], records2[3,1], records2[3,2], records2[4,1], records2[4,2], records2[5,1], records2[5,2], records.pca[1,3], records.pca[1,4], records.pca[2,3], records.pca[2,4], 0.4960265, 0.4827586)
+data <- data.frame(model, error.type, value)
+
+# Plot
+ggplot(data, aes(fill = error.type, y = value, x = model)) + 
+    geom_bar(position = "dodge", stat = "identity") + guides(fill=guide_legend(title = "Error Rate Type")) + ylab("Error Rate") + xlab("Model Type") + ggtitle("Train and Test Error Rates by Method") + theme(plot.title = element_text(hjust = 0.5), axis.text.x = element_text(angle = 90))
+```
+  
+As we can see above, out of all the modeling methods, Linear Regression has the worst performance in predicting the winning candidate. On the flip side, my Support Vector Machine model was the most accurate in predicting the winning candidate among all the methods, with Lasso and Logistic Regression in a close second and third.  
+  
+If we look closely, with the exception of the Decision Tree model, all test error rates are smaller than their respective training error rate. A possible explanation for this can be that the model is not overfit, which is a really good sign. A second reason is our test data set is 4 times smaller than our training data set. What this means is that when predicting with the test data, the model is actually predicting less observations, and sequentially there is less room for failure.  
+
+
+The two models with the lowest test error rate were Lasso Regression, and Support Vector Machine. So I decided to make maps of a few states visualizing where these two models misclassified the winning candidate. My train and test set were randomly selected, so not all of the counties of a given state are in the test set. So in order to make a complete map I combined the misclassifications from both the train and test set.  
+
+Below are maps indicating the counties Lasso Regression and Support Vector Machine misclassified in California, Texas, and Florida.  
+
+
+```{r}
+# Filtering out data to get counties which were mis-classified for Lasso
+elec.map.tr <- election.cl.copy[idx.tr,] %>% select(state, county, candidate) %>% mutate(pred = train.lasso$cand_train)
+elec.map.te <- election.cl.copy[-idx.tr,] %>% select(state, county, candidate) %>% mutate(pred = test.lasso$cand_test)
+
+# For SVM
+map.svm.tr <- election.cl.copy[idx.tr,] %>% select(state, county, candidate) %>% mutate(pred = svm.pred.tr)
+map.svm.te <- election.cl.copy[-idx.tr,] %>% select(state, county, candidate) %>% mutate(pred = svm.pred.te)
+
+# Lasso
+tr.las.mis.ca <- elec.map.tr[elec.map.tr$pred != elec.map.tr$candidate,] %>% filter(state == "california")
+te.las.mis.ca <- elec.map.te[elec.map.te$pred != elec.map.te$candidate,] %>% filter(state == "california")
+
+# SVM
+tr.svm.mis.ca <- map.svm.tr[map.svm.tr$pred != map.svm.tr$candidate,] %>% filter(state == "california")
+te.svm.mis.ca <- map.svm.te[map.svm.te$pred != map.svm.te$candidate,] %>% filter(state == "california")
+
+# making a copy of ca.counties
+ca.counties.svm <- subset(counties, state == "california") 
+
+# Looping Through SVM data and adding miss-classification by county
+ca.counties.svm$mis <- rep(FALSE, length(ca.counties$county))
+
+for (county in tr.svm.mis.ca$county){
+  ca.counties.svm$mis <- ca.counties.svm$mis | (ca.counties.svm$county == county)
+}
+for (county in te.svm.mis.ca$county){
+  ca.counties.svm$mis <- ca.counties.svm$mis | (ca.counties.svm$county == county)
+}
+
+# Looping Through Lasso data and adding miss-classification by county
+ca.counties$mis <- rep(FALSE, length(ca.counties$county))
+for (county in tr.las.mis.ca$county){
+  ca.counties$mis <- ca.counties$mis | (ca.counties$county == county)
+}
+for (county in te.las.mis.ca$county){
+  ca.counties$mis <- ca.counties$mis | (ca.counties$county == county)
+}
+```
+
+
+```{r, fig.align='center', fig.height=8, fig.width=8.5, message=FALSE, warning=FALSE}
+# Map of California miss-classifications by Lasso
+plot1 <- ggplot(data = ca.counties) + geom_polygon(aes(x = long, y = lat, fill = factor(mis), group = group), color = "white") + coord_fixed(1.3) + ggtitle("Lasso Regression") + theme(plot.title = element_text(hjust = 0.5)) + scale_fill_manual(values = alpha(c("springgreen4", "red"), 0.8)) + guides(fill = guide_legend(title = "Classification")) + scale_fill_discrete(labels=c('True', 'False'), type = c("springgreen4", "red"))
+
+# Map of California miss-classifications by SVM
+plot2 <- ggplot(data = ca.counties.svm) + geom_polygon(aes(x = long, y = lat, fill = factor(mis), group = group), color = "white") + coord_fixed(1.3) + ggtitle("SVM") + theme(plot.title = element_text(hjust = 0.5)) + scale_fill_manual(values = alpha(c("springgreen4", "red"), 0.8)) + guides(fill = guide_legend(title = "Classification")) + scale_fill_discrete(labels=c('True', 'False'), type = c("springgreen4", "red")) 
+
+# Plotting both maps side by side
+grid.arrange(plot1, plot2, ncol=2, top = textGrob("Misclassified Counties in California by Method", vjust = 5, gp = gpar(fontsize=20,font=3)))
+```
+
+
+```{r}
+# Filtering out data to get counties which were mis-classified for Lasso
+# Lasso
+tr.las.mis.tx <- elec.map.tr[elec.map.tr$pred != elec.map.tr$candidate,] %>% filter(state == "texas")
+te.las.mis.tx <- elec.map.te[elec.map.te$pred != elec.map.te$candidate,] %>% filter(state == "texas")
+
+# SVM
+tr.svm.mis.tx <- map.svm.tr[map.svm.tr$pred != map.svm.tr$candidate,] %>% filter(state == "texas")
+te.svm.mis.tx <- map.svm.te[map.svm.te$pred != map.svm.te$candidate,] %>% filter(state == "texas")
+
+# making a copy of ca.counties
+tx.counties.las <- subset(counties, state == "texas") 
+tx.counties.svm <- subset(counties, state == "texas") 
+
+# Looping Through SVM data and adding miss-classification by county
+tx.counties.svm$mis <- rep(FALSE, length(tx.counties.svm$county))
+
+for (county in tr.svm.mis.tx$county){
+  tx.counties.svm$mis <- tx.counties.svm$mis | (tx.counties.svm$county == county)
+}
+for (county in te.svm.mis.tx$county){
+  tx.counties.svm$mis <- tx.counties.svm$mis | (tx.counties.svm$county == county)
+}
+
+# Looping Through Lasso data and adding miss-classification by county
+tx.counties.las$mis <- rep(FALSE, length(tx.counties.las$county))
+for (county in tr.las.mis.tx$county){
+  tx.counties.las$mis <- tx.counties.las$mis | (tx.counties.las$county == county)
+}
+for (county in te.las.mis.tx$county){
+  tx.counties.las$mis <- tx.counties.las$mis | (tx.counties.las$county == county)
+}
+```
+
+```{r, fig.align='center', fig.height=8, fig.width=8.5, message=FALSE, warning=FALSE}
+# Map of Texas miss-classifications by Lasso
+plot3 <-ggplot(data = tx.counties.las) + geom_polygon(aes(x = long, y = lat, fill = factor(mis), group = group), color = "white") + coord_fixed(1.3) + ggtitle("Lasso Regression") + theme(plot.title = element_text(hjust = 0.5)) + scale_fill_manual(values = alpha(c("springgreen4", "red"), 0.8)) + guides(fill = guide_legend(title = "Classification")) + scale_fill_discrete(labels=c('True', 'False'), type = c("springgreen4", "red")) 
+
+# Map of Texas miss-classifications by SVM
+plot4 <- ggplot(data = tx.counties.svm) + geom_polygon(aes(x = long, y = lat, fill = factor(mis), group = group), color = "white") + coord_fixed(1.3) + ggtitle("SVM") + theme(plot.title = element_text(hjust = 0.5)) + scale_fill_manual(values = alpha(c("springgreen4", "red"), 0.8)) + guides(fill = guide_legend(title = "Classification")) + scale_fill_discrete(labels=c('True', 'False'), type = c("springgreen4", "red"))
+
+# Plotting both maps side by side
+grid.arrange(plot3, plot4, ncol=2, top = textGrob("Misclassified Counties in Texas by Method", vjust = 5, gp=gpar(fontsize=20,font=3)))
+```
+
+```{r}
+# Filtering out data to get counties which were mis-classified 
+# Lasso
+tr.las.mis.fl <- elec.map.tr[elec.map.tr$pred != elec.map.tr$candidate,] %>% filter(state == "florida")
+te.las.mis.fl <- elec.map.te[elec.map.te$pred != elec.map.te$candidate,] %>% filter(state == "florida")
+
+# SVM
+tr.svm.mis.fl <- map.svm.tr[map.svm.tr$pred != map.svm.tr$candidate,] %>% filter(state == "florida")
+te.svm.mis.fl <- map.svm.te[map.svm.te$pred != map.svm.te$candidate,] %>% filter(state == "florida")
+
+# making a copy of ca.counties
+fl.counties.las <- subset(counties, state == "florida") 
+fl.counties.svm <- subset(counties, state == "florida") 
+
+# Looping Through SVM data and adding miss-classification by county
+fl.counties.svm$mis <- rep(FALSE, length(fl.counties.svm$county))
+
+for (county in tr.svm.mis.fl$county){
+  fl.counties.svm$mis <- fl.counties.svm$mis | (fl.counties.svm$county == county)
+}
+for (county in te.svm.mis.fl$county){
+  fl.counties.svm$mis <- fl.counties.svm$mis | (fl.counties.svm$county == county)
+}
+
+# Looping Through Lasso data and adding miss-classification by county
+fl.counties.las$mis <- rep(FALSE, length(fl.counties.las$county))
+for (county in tr.las.mis.fl$county){
+  fl.counties.las$mis <- fl.counties.las$mis | (fl.counties.las$county == county)
+}
+for (county in te.las.mis.tx$county){
+  fl.counties.las$mis <- fl.counties.las$mis | (fl.counties.las$county == county)
+}
+```
+
+```{r, fig.align='center', fig.height=8, fig.width=8.5, message=FALSE, warning=FALSE}
+# Map of Texas miss-classifications by Lasso
+plot5 <- ggplot(data = fl.counties.las) + geom_polygon(aes(x = long, y = lat, fill = factor(mis), group = group), color = "white") + coord_fixed(1.3) + ggtitle("Lasso Regression") + theme(plot.title = element_text(hjust = 0.5)) + scale_fill_manual(values = alpha(c("springgreen4", "red"), 0.8)) + guides(fill = guide_legend(title = "Classification")) + scale_fill_discrete(labels=c('True', 'False'), type = c("springgreen4", "red")) 
+
+# Map of Texas miss-classifications by SVM
+plot6 <- ggplot(data = fl.counties.svm) + geom_polygon(aes(x = long, y = lat, fill = factor(mis), group = group), color = "white") + coord_fixed(1.3) + ggtitle("SVM") + theme(plot.title = element_text(hjust = 0.5)) + scale_fill_manual(values = alpha(c("springgreen4", "red"), 0.8)) + guides(fill = guide_legend(title = "Classification")) + scale_fill_discrete(labels=c('True', 'False'), type = c("springgreen4", "red"))
+
+# Plotting both maps side by side
+grid.arrange(plot5, plot6, ncol=2, top = textGrob("Misclassified Counties in Florida by Method", vjust = 5, gp=gpar(fontsize=20,font=3)))
+```
+
+Relative to Florida and Texas, California has the most misclassified between the three. This suggests that my SVM and Lasso models were not great at predicting counties specifically in California.  
+
+### Final Thoughts
+A few of the models I created were very accurate, although there is a very important part to remember in this project is that all of the models were trained with the actual results from the 2020. In the real world, we would want to predict the 2020 elections before the elections were held, and with out the actual data from the election. So ideally, we would take data from prior elections, and a comnination of census data during those prior elections along with updated 2020 census data. The only issue with this is that we will have different candidates to predict, so we may have to classify based on political party. 
+
+
+Thank you for reading and analyzing!
+
+
+
